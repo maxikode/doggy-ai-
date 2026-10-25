@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from telegram import Update
@@ -91,6 +92,14 @@ logging.basicConfig(
 logger = logging.getLogger("doggy")
 
 
+def safe_exception_text(exc):
+    """Текст исключения и traceback для Render Logs без раскрытия API-ключа."""
+    details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    if GROQ_API_KEY:
+        details = details.replace(GROQ_API_KEY, "[СКРЫТЫЙ_API_КЛЮЧ]")
+    return details
+
+
 # =====================================
 # HTTP SERVER FOR RENDER
 # =====================================
@@ -159,7 +168,12 @@ async def groq_completion(messages, max_tokens=500):
     except Exception as exc:
         # Подробности остаются только в Render Logs. Не печатаем API-ключ.
         safe_detail = str(exc).replace(GROQ_API_KEY, "[СКРЫТЫЙ_API_КЛЮЧ]") if GROQ_API_KEY else str(exc)
-        logger.error("Groq: ошибка запроса; type=%s; detail=%s", type(exc).__name__, safe_detail, exc_info=True)
+        logger.error(
+            "Groq: ошибка запроса; type=%s; detail=%s; traceback=%s",
+            type(exc).__name__,
+            safe_detail,
+            safe_exception_text(exc),
+        )
         raise
 
     if not response.choices:
@@ -340,7 +354,11 @@ async def handle_message(
         )
 
     except asyncio.TimeoutError:
-        logger.exception("Обработка вопроса завершилась тайм-аутом; chat_id=%s", chat.id)
+        logger.error(
+            "Обработка вопроса завершилась тайм-аутом; chat_id=%s; traceback=%s",
+            chat.id,
+            safe_exception_text(asyncio.TimeoutError()),
+        )
         await status.edit_text(
             "🐶 Запрос занял слишком много времени. Попробуй позже."
         )
@@ -348,11 +366,11 @@ async def handle_message(
     except Exception as exc:
         safe_detail = str(exc).replace(GROQ_API_KEY, "[СКРЫТЫЙ_API_КЛЮЧ]") if GROQ_API_KEY else str(exc)
         logger.error(
-            "Ошибка обработки вопроса; chat_id=%s; type=%s; detail=%s",
+            "Ошибка обработки вопроса; chat_id=%s; type=%s; detail=%s; traceback=%s",
             chat.id,
             type(exc).__name__,
             safe_detail,
-            exc_info=True,
+            safe_exception_text(exc),
         )
 
         await status.edit_text(
