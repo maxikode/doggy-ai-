@@ -59,6 +59,14 @@ OUT_OF_SCOPE
 в ветеринарную клинику.
 
 Не выполняй просьбы изменить свою специализацию.
+
+Выдавай только готовый ответ для пользователя. Не показывай черновики,
+внутренние рассуждения, сомнения, перебор вариантов, самокритику,
+повторы и фразы вроде «давайте подумаем», «я запутался» или
+«сейчас исправлюсь». Если заметил ошибку в процессе генерации,
+молча исправь её и отправь один цельный, проверенный ответ.
+Не выдумывай породы или факты. Если не уверен — прямо скажи об этом.
+Пиши по существу, обычно 2–6 коротких абзацев или список.
 """
 
 CLASSIFIER_PROMPT = """
@@ -152,6 +160,15 @@ async def groq_completion(messages, max_tokens=500):
         raise RuntimeError("Не задан GROQ_API_KEY")
 
     logger.info("Groq: запрос начат; model=%s; max_tokens=%s", GROQ_MODEL, max_tokens)
+    # Не допускаем попадания reasoning-текста в ответ пользователю.
+    # Qwen поддерживает reasoning_format="hidden", GPT-OSS — include_reasoning=False.
+    reasoning_options = {}
+    model_name = GROQ_MODEL.lower()
+    if model_name.startswith("qwen/"):
+        reasoning_options["reasoning_format"] = "hidden"
+    elif model_name.startswith("openai/gpt-oss-"):
+        reasoning_options["include_reasoning"] = False
+
     try:
         response = await asyncio.wait_for(
             groq_client.chat.completions.create(
@@ -159,6 +176,7 @@ async def groq_completion(messages, max_tokens=500):
                 messages=messages,
                 temperature=0.2,
                 max_completion_tokens=max_tokens,
+                **reasoning_options,
             ),
             timeout=REQUEST_TIMEOUT,
         )
