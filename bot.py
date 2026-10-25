@@ -142,15 +142,25 @@ async def groq_completion(messages, max_tokens=500):
     if groq_client is None:
         raise RuntimeError("Не задан GROQ_API_KEY")
 
-    response = await asyncio.wait_for(
-        groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            temperature=0.2,
-            max_completion_tokens=max_tokens,
-        ),
-        timeout=REQUEST_TIMEOUT,
-    )
+    logger.info("Groq: запрос начат; model=%s; max_tokens=%s", GROQ_MODEL, max_tokens)
+    try:
+        response = await asyncio.wait_for(
+            groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=0.2,
+                max_completion_tokens=max_tokens,
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Groq: превышен тайм-аут %s секунд", REQUEST_TIMEOUT)
+        raise
+    except Exception as exc:
+        # Подробности остаются только в Render Logs. Не печатаем API-ключ.
+        safe_detail = str(exc).replace(GROQ_API_KEY, "[СКРЫТЫЙ_API_КЛЮЧ]") if GROQ_API_KEY else str(exc)
+        logger.error("Groq: ошибка запроса; type=%s; detail=%s", type(exc).__name__, safe_detail, exc_info=True)
+        raise
 
     if not response.choices:
         raise RuntimeError("Groq вернул пустой ответ")
@@ -164,6 +174,7 @@ async def groq_completion(messages, max_tokens=500):
 
 
 async def is_dog_question(question):
+    logger.info("Этап 1/2: проверка, относится ли вопрос к собакам")
     result = await groq_completion(
         [
             {
@@ -178,13 +189,17 @@ async def is_dog_question(question):
         max_tokens=10,
     )
 
-    return result.strip().upper() == "DOG"
+    is_dog = result.strip().upper() == "DOG"
+    logger.info("Этап 1/2 завершён; dog_question=%s", is_dog)
+    return is_dog
 
 
 async def ask_doggy(question):
     if not await is_dog_question(question):
+        logger.info("Вопрос не относится к собакам; отправляется стандартный отказ")
         return DOGGY_REFUSAL
 
+    logger.info("Этап 2/2: генерация ответа о собаках")
     answer = await groq_completion(
         [
             {
@@ -200,8 +215,10 @@ async def ask_doggy(question):
     )
 
     if answer.strip().upper() == "OUT_OF_SCOPE":
+        logger.info("Модель вернула OUT_OF_SCOPE")
         return DOGGY_REFUSAL
 
+    logger.info("Этап 2/2 завершён; ответ получен")
     return answer[:MAX_ANSWER_LENGTH]
 
 
@@ -265,9 +282,18 @@ async def handle_message(
     chat = update.effective_chat
 
     if message is None or chat is None:
+        logger.info("Обновление пропущено: нет message или chat")
         return
 
+    logger.info(
+        "Сообщение получено: chat_id=%s, chat_type=%s, has_text=%s",
+        chat.id,
+        chat.type,
+        bool(message.text or message.caption),
+    )
+
     if chat.type not in ("group", "supergroup"):
+        logger.info("Сообщение пропущено: чат не является группой")
         return
 
     if message.from_user and message.from_user.is_bot:
@@ -286,6 +312,11 @@ async def handle_message(
         context.bot_data["bot_username"] = bot_username
 
     question = extract_question(text, bot_username)
+    logger.info(
+        "Триггер проверен: chat_id=%s, question_found=%s",
+        chat.id,
+        question is not None,
+    )
 
     if question is None:
         return
@@ -296,7 +327,9 @@ async def handle_message(
         )
         return
 
+    logger.info("Вопрос принят: chat_id=%s; длина=%s символов", chat.id, len(question))
     status = await message.reply_text("🐶 Думаю...")
+    logger.info("Статус «Думаю...» отправлен; chat_id=%s", chat.id)
 
     try:
         answer = await ask_doggy(question)
@@ -307,12 +340,20 @@ async def handle_message(
         )
 
     except asyncio.TimeoutError:
+        logger.exception("Обработка вопроса завершилась тайм-аутом; chat_id=%s", chat.id)
         await status.edit_text(
             "🐶 Запрос занял слишком много времени. Попробуй позже."
         )
 
-    except Exception:
-        logger.exception("Ошибка обработки вопроса")
+    except Exception as exc:
+        safe_detail = str(exc).replace(GROQ_API_KEY, "[СКРЫТЫЙ_API_КЛЮЧ]") if GROQ_API_KEY else str(exc)
+        logger.error(
+            "Ошибка обработки вопроса; chat_id=%s; type=%s; detail=%s",
+            chat.id,
+            type(exc).__name__,
+            safe_detail,
+            exc_info=True,
+        )
 
         await status.edit_text(
             "🐶 Сейчас не получается получить ответ. Попробуй позже."
@@ -366,7 +407,7 @@ def main():
 
     application.add_error_handler(error_handler)
 
-    logger.info("Doggy AI запускается")
+    logger.info("Doggy AI запускается; model=%s", GROQ_MODEL)
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
